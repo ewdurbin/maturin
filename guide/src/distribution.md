@@ -104,6 +104,14 @@ Options:
       --include-debuginfo
           Include debug info files (.pdb on Windows, .dSYM on macOS, .dwp on Linux) in the wheel. When enabled, maturin automatically configures split-debuginfo=packed so that separate debug info files are produced
 
+      --debug-symbols
+          Export debug companions outside the wheel, and strip packaged binaries. Symbols default to
+          the wheel output directory. Configure the desired debug information in your Cargo profile
+
+      --debug-symbols-out <DIR>
+          Write debug companions to DIR instead of the wheel output directory. Requires
+          --debug-symbols
+
       --sbom-include <SBOM_INCLUDE>...
           Additional SBOM files to include in the `.dist-info/sboms` directory. Can be specified multiple times
 
@@ -196,10 +204,67 @@ Manifest Options:
           Run without accessing the network
 ```
 
-Directories named `*.whl.symbols` or `.maturin-symbols-*` are reserved for
-symbol exports and are excluded from wheels and sdists. This also applies to
-later builds that change the export directory or disable symbol export.
-Other files alongside these directories are packaged normally.
+### Exporting debug symbols
+
+Use `maturin build --debug-symbols` to build stripped wheels and export
+matching debug companions for a release workflow. They are written alongside
+the wheels in `--out` (or the default `target/wheels` directory). For example:
+
+```bash
+CARGO_PROFILE_RELEASE_DEBUG=2 maturin build --release --out dist --debug-symbols
+```
+
+To put symbols in a different directory, add `--debug-symbols-out symbols`.
+`--debug-symbols-out` requires `--debug-symbols`; it does not enable export
+on its own.
+
+For each completed wheel Maturin writes
+`<output>/<complete-wheel-filename>.symbols/`, where `<output>` is the wheel
+output directory or the `--debug-symbols-out` override. The directory contains a
+`<binary>.debug` on Linux GNU and musl, a Cargo-reported `.dSYM` bundle on
+macOS, or a Cargo-reported `.pdb` on Windows MSVC. Multiple binaries share the
+wheel's directory; different Python/ABI/platform tags get different directories.
+Release tooling can archive these directories separately from the wheels. A
+successful rebuild replaces that wheel's directory, removing stale companions.
+Failed builds and Maturin's PGO instrumentation phase do not publish companions.
+
+Maturin reserves two directory-name patterns for symbol exports:
+
+- `.maturin-symbols-*` holds temporary companions while a wheel is being
+  built. Excluding these directories prevents the current build from collecting
+  symbols that have not yet been published.
+- `*.whl.symbols` contains completed exports for a particular wheel.
+  Excluding these directories prevents later builds from packaging those
+  symbols, even if the export directory changes or `--debug-symbols` is
+  disabled.
+
+Both patterns are excluded from wheels and sdists wherever they occur in
+source paths, including external data. Other files alongside these directories
+are packaged normally.
+
+Maturin leaves the chosen Cargo profile, debug level, optimizations, LTO, PGO,
+CRT and native C/C++ compiler settings to you. Set `debug = true` (or your
+desired debug level) in that Cargo profile, and configure native debug info in
+your native build separately. A build with no usable debug information fails
+with an explanation. Maturin delays `--strip`, `[tool.maturin].strip`, and
+Cargo profile stripping until after symbol extraction; explicit stripping linker
+arguments still need to be removed. Linux exports use embedded DWARF
+(`split-debuginfo=off`) for a self-contained `.debug` file, and require LLVM
+tools (`rustup component add llvm-tools`), a target-prefixed GNU `objcopy`,
+or native `objcopy`. Maturin prefers LLVM tools. If they are unavailable it
+checks beside a target-prefixed GNU linker set in Cargo configuration (or
+`CARGO_TARGET_<TRIPLE>_LINKER`), then searches `PATH` for Rust or GNU target
+prefixes (for example `aarch64-linux-gnu-objcopy`). Unprefixed `objcopy` is
+only used for native builds. On macOS, use `split-debuginfo=packed` if configuring
+split debuginfo explicitly. Stripped Mach-O files are ad-hoc signed again.
+Windows PE files keep their CodeView identity for PDB lookup.
+
+The option is incompatible with `--include-debuginfo` and editable installs.
+`maturin build --sdist` also exports symbols, after building the final wheel
+from the sdist. The intermediate source archive excludes the symbols.
+Universal2 is not supported: export one wheel per architecture.
+Exporting symbols never modifies Cargo's cached executable or adds companions
+to the wheel. Wheel `RECORD` hashes describe the final packaged bytes.
 
 ## Source Distribution
 

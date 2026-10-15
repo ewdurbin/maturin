@@ -6,9 +6,11 @@ use anyhow::{Context, Result, anyhow, bail};
 use cargo_metadata::CrateType;
 use fat_macho::FatWriter;
 use fs_err::{self as fs, File};
+use itertools::Itertools as _;
 use normpath::PathExt;
 use std::collections::{HashMap, HashSet};
 use std::env;
+use std::ffi::OsStr;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -353,8 +355,10 @@ fn compile_targets(
     let mut artifacts = Vec::with_capacity(targets.len());
     let mut out_dirs = HashMap::new();
     for cargo_target in targets {
-        let build_command = cargo_build_command(context, python_interpreter, cargo_target)?;
-        let (target_artifacts, target_out_dirs) = compile_target(context, build_command)?;
+        let (build_command, debuginfo_override) =
+            cargo_build_command(context, python_interpreter, cargo_target)?;
+        let (target_artifacts, target_out_dirs) =
+            compile_target(context, build_command, cargo_target, debuginfo_override)?;
         artifacts.push(target_artifacts);
         out_dirs.extend(target_out_dirs);
     }
@@ -368,7 +372,7 @@ fn cargo_build_command(
     context: &BuildContext,
     python_interpreter: Option<&PythonInterpreter>,
     cargo_target: &cargo_metadata::Target,
-) -> Result<Command> {
+) -> Result<(Command, Option<bool>)> {
     use crate::pyproject_toml::{FeatureConditionEnv, FeatureSpec};
 
     let target = &context.project.target;
@@ -423,10 +427,20 @@ fn cargo_build_command(
 
     let target_triple = target.target_triple();
 
-    let manifest_dir = context.project.manifest_path.parent().unwrap();
-    let mut rustflags = cargo_config2::Config::load_with_cwd(manifest_dir)?
-        .rustflags(target_triple)?
-        .unwrap_or_default();
+    let mut rustflags = if context.artifact.debug_symbols_dir.is_some() {
+        // Cargo inherits cwd even when --manifest-path (or --sdist) selects
+        // a manifest elsewhere.
+        crate::debug_symbols::rustflags(
+            &env::current_dir()?,
+            &context.project.cargo_options,
+            target_triple,
+        )?
+    } else {
+        let manifest_dir = context.project.manifest_path.parent().unwrap();
+        cargo_config2::Config::load_with_cwd(manifest_dir)?
+            .rustflags(target_triple)?
+            .unwrap_or_default()
+    };
     let original_rustflags = rustflags.flags.clone();
 
     // Inject PGO flags if a PGO build phase is active
@@ -467,15 +481,52 @@ fn cargo_build_command(
         &context.project.target_dir,
     );
 
-    if context.artifact.strip {
+    if context.artifact.debug_symbols_dir.is_some() {
+        // Do not let either maturin's --strip or a Cargo profile strip the
+        // linked output before we can export symbols. Leave debug level and
+        // all optimization/codegen settings to the caller.
+        cargo_rustc
+            .args
+            .extend(["-C".to_string(), "strip=none".to_string()]);
+        if target.is_linux() {
+            // A .debug companion must contain the DWARF itself, not skeleton
+            // units referring to .dwo/.dwp files outside the export. Apply
+            // this to dependencies as well as the top-level crate.
+            rustflags.push("-C");
+            rustflags.push("split-debuginfo=off");
+        }
+    } else if context.artifact.strip {
         // https://doc.rust-lang.org/rustc/codegen-options/index.html#strip
         cargo_rustc
             .args
             .extend(["-C".to_string(), "strip=symbols".to_string()]);
     }
 
-    configure_debuginfo_flags(&mut rustflags, target, context.artifact.include_debuginfo)?;
+    configure_debuginfo_flags(
+        &mut rustflags,
+        target,
+        context.artifact.include_debuginfo
+            || (target.is_macos() && context.artifact.debug_symbols_dir.is_some()),
+    )?;
 
+    // Cargo reports profile.debuginfo in artifact messages, but not raw rustc
+    // overrides. Cargo appends RUSTFLAGS after the args to `cargo rustc --`;
+    // rustc uses the last debuginfo setting. Include -g and both -C spellings.
+    let debuginfo_override = if context.artifact.debug_symbols_dir.is_some()
+        && (target.is_linux() || target.is_windows() && target.is_msvc())
+    {
+        let encoded = cargo_rustc.args.iter().chain(&rustflags.flags).join("\x1f");
+        rustflags::from_encoded(OsStr::new(&encoded))
+            .filter_map(|flag| match flag {
+                rustflags::Flag::Codegen { opt, value } if opt == "debuginfo" => {
+                    value.map(|v| !matches!(v.as_str(), "0" | "none"))
+                }
+                _ => None,
+            })
+            .last()
+    } else {
+        None
+    };
     let mut build_command = create_build_command(context, cargo_rustc, target_triple)?;
 
     if !rustflags.flags.is_empty() && rustflags.flags != original_rustflags {
@@ -491,7 +542,7 @@ fn cargo_build_command(
         target_triple,
     )?;
 
-    Ok(build_command)
+    Ok((build_command, debuginfo_override))
 }
 
 /// Configure --bin / --lib flags and musl-related rustflags.
@@ -992,6 +1043,8 @@ fn configure_pyo3_env(
 fn compile_target(
     context: &BuildContext,
     mut build_command: Command,
+    cargo_target: &cargo_metadata::Target,
+    debuginfo_override: Option<bool>,
 ) -> Result<(HashMap<CrateType, BuildArtifact>, HashMap<String, PathBuf>)> {
     debug!("Running {:?}", build_command);
 
@@ -1004,6 +1057,7 @@ fn compile_target(
         .context("Failed to run `cargo rustc`")?;
 
     let mut artifacts = HashMap::new();
+    let mut project_debuginfo = None;
     let mut linked_paths = Vec::new();
     let mut out_dirs: HashMap<String, PathBuf> = HashMap::new();
 
@@ -1042,6 +1096,13 @@ fn compile_target(
 
                 // Extract the location of the .so/.dll/etc. from cargo's json output
                 if crate_name.as_ref() == context.project.crate_name {
+                    // Only the requested target's debug settings matter. This
+                    // same package may have emitted a lib while compiling a bin.
+                    if artifact.target.src_path == cargo_target.src_path {
+                        project_debuginfo = Some(debuginfo_override.unwrap_or(
+                            artifact.profile.debuginfo != cargo_metadata::ArtifactDebuginfo::None,
+                        ));
+                    }
                     let num_crate_types = artifact.target.crate_types.len();
                     let mut filenames_iter = artifact.filenames.into_iter();
                     let cargo_path = |filename: cargo_metadata::camino::Utf8PathBuf| {
@@ -1156,6 +1217,24 @@ fn compile_target(
             status,
             build_command,
         )
+    }
+
+    // System DWARF or an MSVC PDB can be present without project debug info.
+    let target = &context.project.target;
+    if context.artifact.debug_symbols_dir.is_some()
+        && (target.is_linux() || target.is_windows() && target.is_msvc())
+        && !matches!(
+            context.artifact.pgo_phase,
+            Some(crate::pgo::PgoPhase::Generate(_))
+        )
+        && project_debuginfo == Some(false)
+    {
+        bail!(
+            "No project debug information was compiled for {}. Set debug = true in the \
+             selected Cargo profile (for example CARGO_PROFILE_RELEASE_DEBUG=2) \
+             or enable debuginfo in rustc flags.",
+            cargo_target.name
+        );
     }
 
     Ok((artifacts, out_dirs))

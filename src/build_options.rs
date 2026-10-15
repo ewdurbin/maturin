@@ -92,6 +92,17 @@ pub struct OutputOptions {
     #[arg(long)]
     pub include_debuginfo: bool,
 
+    /// Export debug companions outside the wheel, and strip packaged binaries.
+    /// Symbols default to the wheel output directory. Configure the desired
+    /// debug information in your Cargo profile.
+    #[arg(long, conflicts_with = "include_debuginfo")]
+    pub debug_symbols: bool,
+
+    /// Write debug companions to DIR instead of the wheel output directory.
+    /// Requires --debug-symbols.
+    #[arg(long, value_name = "DIR", requires = "debug_symbols")]
+    pub debug_symbols_out: Option<PathBuf>,
+
     /// Additional SBOM files to include in the `.dist-info/sboms` directory.
     /// Can be specified multiple times.
     #[arg(long = "sbom-include", num_args = 1.., action = clap::ArgAction::Append)]
