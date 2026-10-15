@@ -191,6 +191,30 @@ impl BuildContextBuilder {
         let (strip, include_debuginfo, auditwheel) =
             Self::resolve_build_flags(strip, &build_options, pyproject, &target);
 
+        // Also validate library users who do not go through clap.
+        if build_options.output.debug_symbols_out.is_some() && !build_options.output.debug_symbols {
+            bail!("--debug-symbols-out requires --debug-symbols");
+        }
+        // "build --sdist" and "publish" build an intermediate sdist first.
+        // Validate the export policy when building the wheel from it.
+        if build_options.output.debug_symbols && !sdist_only {
+            if build_options.output.include_debuginfo {
+                bail!("--debug-symbols cannot be used with --include-debuginfo");
+            }
+            if editable {
+                bail!("--debug-symbols is only supported for non-editable wheel builds");
+            }
+            if universal2 {
+                bail!(
+                    "--debug-symbols does not yet support universal2; build each architecture separately"
+                );
+            }
+            if !(target.is_linux() || target.is_macos() || target.is_windows() && target.is_msvc())
+            {
+                bail!("--debug-symbols supports Linux, macOS, and Windows MSVC targets only");
+            }
+        }
+
         let sbom = Self::resolve_sbom_config(&build_options, pyproject);
 
         let ResolvedPlatformTags {
@@ -264,6 +288,12 @@ impl BuildContextBuilder {
             None
         };
 
+        let debug_symbols_dir = build_options.output.debug_symbols.then(|| {
+            build_options
+                .output
+                .debug_symbols_out
+                .unwrap_or_else(|| wheel_dir.clone())
+        });
         Ok(BuildContext {
             project: ProjectContext {
                 bridge,
@@ -290,6 +320,7 @@ impl BuildContextBuilder {
                 sbom,
                 include_import_lib,
                 include_debuginfo,
+                debug_symbols_dir,
                 pgo_phase: None,
                 pgo_command,
                 generate_stubs: build_options.generate_stubs,

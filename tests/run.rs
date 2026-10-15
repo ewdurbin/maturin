@@ -1,6 +1,8 @@
 //! To speed up the tests, they are all collected in a single integration-test crate.
 
 mod common;
+#[path = "run/debug_symbols.rs"]
+mod debug_symbols;
 #[path = "run/develop.rs"]
 mod develop;
 #[path = "run/environment.rs"]

@@ -122,6 +122,14 @@ Options:
           When enabled, maturin automatically configures split-debuginfo=packed so that separate
           debug info files are produced
 
+      --debug-symbols
+          Export debug companions outside the wheel, and strip packaged binaries. Symbols default to
+          the wheel output directory. Configure the desired debug information in your Cargo profile
+
+      --debug-symbols-out <DIR>
+          Write debug companions to DIR instead of the wheel output directory. Requires
+          --debug-symbols
+
       --sbom-include <SBOM_INCLUDE>...
           Additional SBOM files to include in the `.dist-info/sboms` directory. Can be specified
           multiple times
