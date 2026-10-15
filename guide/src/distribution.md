@@ -196,6 +196,11 @@ Manifest Options:
           Run without accessing the network
 ```
 
+Directories named `*.whl.symbols` or `.maturin-symbols-*` are reserved for
+symbol exports and are excluded from wheels and sdists. This also applies to
+later builds that change the export directory or disable symbol export.
+Other files alongside these directories are packaged normally.
+
 ## Source Distribution
 
 Maturin supports building through `pyproject.toml`. To use it, create a `pyproject.toml` next to your `Cargo.toml` with the following content:
