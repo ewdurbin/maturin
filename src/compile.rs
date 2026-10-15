@@ -1044,48 +1044,48 @@ fn compile_target(
                 if crate_name.as_ref() == context.project.crate_name {
                     let num_crate_types = artifact.target.crate_types.len();
                     let mut filenames_iter = artifact.filenames.into_iter();
+                    let cargo_path = |filename: cargo_metadata::camino::Utf8PathBuf| {
+                        if using_cross && filename.starts_with("/target") {
+                            // Convert paths inside cross's Docker target directory to the host.
+                            context
+                                .project
+                                .cargo_metadata
+                                .target_directory
+                                .join(filename.strip_prefix("/target").unwrap())
+                                .into_std_path_buf()
+                        } else {
+                            filename.into_std_path_buf()
+                        }
+                    };
                     for crate_type in artifact.target.crate_types {
                         if let Some(filename) = filenames_iter.next() {
-                            let path = if using_cross && filename.starts_with("/target") {
-                                // Convert cross target path in docker back to path on host
-                                context
-                                    .project
-                                    .cargo_metadata
-                                    .target_directory
-                                    .join(filename.strip_prefix("/target").unwrap())
-                                    .into_std_path_buf()
-                            } else {
-                                filename.into()
-                            };
-                            let artifact = BuildArtifact {
-                                path,
+                            let mut artifact = BuildArtifact {
+                                path: cargo_path(filename),
                                 import_lib_path: None,
                                 debuginfo_path: None,
                                 linked_paths: Vec::new(),
                                 thin_artifacts: Vec::new(),
                                 staging: CargoOutputState::NotStaged,
                             };
-                            artifacts.insert(crate_type, artifact);
-                        }
-                    }
-                    // Remaining filenames may include import libraries (.dll.lib, .dll.a)
-                    // and debug info files (.pdb, .dSYM, .dwp)
-                    if num_crate_types == 1
-                        && let Some((_, artifact)) = artifacts.iter_mut().next()
-                    {
-                        for extra in filenames_iter {
-                            let extra_path: PathBuf = extra.into();
-                            if let Some(ext) = extra_path.extension() {
-                                if (ext == "lib" || ext == "a")
-                                    && artifact.import_lib_path.is_none()
-                                {
-                                    artifact.import_lib_path = Some(extra_path);
-                                } else if (ext == "pdb" || ext == "dSYM" || ext == "dwp")
-                                    && artifact.debuginfo_path.is_none()
-                                {
-                                    artifact.debuginfo_path = Some(extra_path);
+                            // Extras belong to this Cargo message, not to the
+                            // first entry in the accumulated package artifacts.
+                            if num_crate_types == 1 {
+                                for extra in filenames_iter.by_ref() {
+                                    let extra_path = cargo_path(extra);
+                                    if let Some(ext) = extra_path.extension() {
+                                        if (ext == "lib" || ext == "a")
+                                            && artifact.import_lib_path.is_none()
+                                        {
+                                            artifact.import_lib_path = Some(extra_path);
+                                        } else if (ext == "pdb" || ext == "dSYM" || ext == "dwp")
+                                            && artifact.debuginfo_path.is_none()
+                                        {
+                                            artifact.debuginfo_path = Some(extra_path);
+                                        }
+                                    }
                                 }
                             }
+                            artifacts.insert(crate_type, artifact);
                         }
                     }
                 }
