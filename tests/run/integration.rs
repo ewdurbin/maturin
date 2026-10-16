@@ -8,6 +8,106 @@ use crate::common::{
 };
 use std::path::Path;
 
+#[cfg(any(target_os = "macos", target_env = "msvc"))]
+#[test]
+fn compiler_associates_companions_with_each_binary() -> anyhow::Result<()> {
+    use anyhow::Context;
+    use cargo_metadata::CrateType;
+    use maturin::{BuildOptions, CargoOptions, OutputOptions};
+    use std::process::Command;
+
+    // CI can disable Rust debug info globally to speed up maturin's own build.
+    // Run this test in isolation with the fixture's flags, without changing
+    // the environment of the other tests running in parallel.
+    if [
+        "RUSTFLAGS",
+        "CARGO_ENCODED_RUSTFLAGS",
+        "CARGO_BUILD_RUSTFLAGS",
+    ]
+    .iter()
+    .any(|key| std::env::var_os(key).is_some())
+    {
+        let output = Command::new(std::env::current_exe()?)
+            .args([
+                "--exact",
+                "integration::compiler_associates_companions_with_each_binary",
+                "--nocapture",
+            ])
+            .env_remove("RUSTFLAGS")
+            .env_remove("CARGO_ENCODED_RUSTFLAGS")
+            .env_remove("CARGO_BUILD_RUSTFLAGS")
+            .output()?;
+        assert!(
+            output.status.success(),
+            "{}\n{}\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return Ok(());
+    }
+
+    let tmp = tempfile::tempdir()?;
+    let root = tmp.path();
+    fs_err::create_dir_all(root.join("src/bin"))?;
+    fs_err::write(
+        root.join("Cargo.toml"),
+        "[package]\nname = 'companions-test'\nversion = '1.0.0'\nedition = '2021'\n\n\
+         [profile.companions]\ninherits = 'dev'\ndebug = 2\nstrip = false\n",
+    )?;
+    fs_err::write(
+        root.join("pyproject.toml"),
+        "[build-system]\nrequires = ['maturin']\nbuild-backend = 'maturin'\n\n\
+         [tool.maturin]\nbindings = 'bin'\n",
+    )?;
+    fs_err::write(
+        root.join("src/lib.rs"),
+        "pub fn message() -> &'static str { \"test\" }\n",
+    )?;
+    for name in ["one", "two"] {
+        fs_err::write(
+            root.join(format!("src/bin/{name}.rs")),
+            "fn main() { println!(\"{}\", companions_test::message()); }\n",
+        )?;
+    }
+    let context = BuildOptions {
+        cargo: CargoOptions {
+            manifest_path: Some(root.join("Cargo.toml")),
+            profile: Some("companions".into()),
+            ..Default::default()
+        },
+        output: OutputOptions {
+            include_debuginfo: true,
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+    .into_build_context()
+    .strip(Some(false))
+    .build()?;
+
+    // Fresh and cached Cargo messages must both attach the extra files to
+    // the binary, rather than to an arbitrary entry for the same package.
+    for _ in 0..8 {
+        let result = maturin::compile(&context, None, &context.project.compile_targets)?;
+        assert_eq!(result.artifacts.len(), 2);
+        for artifacts in result.artifacts {
+            let binary = artifacts.get(&CrateType::Bin).context("missing binary")?;
+            #[cfg(target_os = "macos")]
+            let expected = binary.path.with_extension("dSYM");
+            #[cfg(target_env = "msvc")]
+            let expected = binary.path.with_extension("pdb");
+            assert!(
+                expected.exists(),
+                "missing Cargo companion: {}",
+                expected.display()
+            );
+            assert_eq!(binary.debuginfo_path.as_deref(), Some(expected.as_path()));
+        }
+    }
+    Ok(())
+}
+
 #[test]
 fn integration_pyo3_bin() {
     let python_implementation = test_python_implementation().unwrap();

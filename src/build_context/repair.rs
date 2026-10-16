@@ -423,7 +423,10 @@ fn stage_file(artifact_path: &Path, staging_dir: &Path) -> Result<(PathBuf, Carg
 ///   an audited artifact (we always stage before auditing) but we
 ///   degrade gracefully; `Patched` means a previous call already did
 ///   the work.
-fn copy_back_cargo_outputs(audited: &mut [AuditedArtifact], will_patch: &[bool]) -> Result<()> {
+pub(crate) fn copy_back_cargo_outputs(
+    audited: &mut [AuditedArtifact],
+    will_patch: &[bool],
+) -> Result<()> {
     for (aa, &will_patch) in audited.iter_mut().zip(will_patch) {
         if !will_patch {
             continue;

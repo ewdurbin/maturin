@@ -87,6 +87,7 @@ pub mod ci;
 mod compile;
 mod compression;
 mod cross_compile;
+mod debug_symbols;
 pub(crate) mod develop;
 mod generate_json_schema;
 mod metadata;

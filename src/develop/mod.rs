@@ -417,6 +417,8 @@ pub fn develop(develop_options: DevelopOptions, venv_dir: &Path) -> Result<()> {
         output: OutputOptions {
             out: Some(wheel_dir.path().to_path_buf()),
             include_debuginfo: !strip && target.is_windows(),
+            debug_symbols: false,
+            debug_symbols_out: None,
             sbom_include: Vec::new(),
         },
         cargo: CargoOptions {
