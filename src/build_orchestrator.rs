@@ -5,6 +5,7 @@ use crate::binding_generator::{
 };
 use crate::build_context::finalize_staged_artifacts;
 use crate::compile::{missing_cdylib_error, missing_cdylib_message, warn_missing_py_init};
+use crate::debug_symbols::DebugSymbols;
 use crate::module_writer::{WheelWriter, add_data, write_pth};
 use crate::pgo::{PgoContext, PgoPhase};
 use crate::sbom::SbomData;
@@ -465,6 +466,10 @@ impl<'a> BuildOrchestrator<'a> {
         generate_binding(&mut writer, &mut generator, self.context, audited, out_dirs)
             .context("Failed to add the files to the wheel")?;
 
+        // Binding generators (notably PyO3 introspection on ELF) need the
+        // unstripped symbol table. Non-editable wheels track the staged files
+        // by path, so stripping here still precedes the byte reads in finish().
+        let symbols = DebugSymbols::prepare(self.context, audited)?;
         self.add_pth(&mut writer)?;
         add_data(
             &mut writer,
@@ -485,6 +490,9 @@ impl<'a> BuildOrchestrator<'a> {
             std::slice::from_ref(tag),
         )?;
         finalize_staged_artifacts(audited);
+        if let Some(symbols) = symbols {
+            symbols.publish(&wheel_path)?;
+        }
         Ok(wheel_path)
     }
 

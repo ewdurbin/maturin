@@ -2,7 +2,7 @@ mod builder;
 mod repair;
 
 pub use builder::BuildContextBuilder;
-pub(crate) use repair::finalize_staged_artifacts;
+pub(crate) use repair::{copy_back_cargo_outputs, finalize_staged_artifacts};
 
 use crate::auditwheel::AuditWheelMode;
 use crate::auditwheel::PlatformTag;
@@ -100,6 +100,8 @@ pub struct ArtifactContext {
     pub include_import_lib: bool,
     /// Include debug info files (.pdb, .dSYM, .dwp) in the wheel
     pub include_debuginfo: bool,
+    /// Export debug companions for each completed wheel to this directory
+    pub debug_symbols_dir: Option<PathBuf>,
     /// Current PGO build phase (if PGO is enabled)
     pub pgo_phase: Option<PgoPhase>,
     /// PGO training command from pyproject.toml (only set when --pgo is passed)

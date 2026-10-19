@@ -77,6 +77,30 @@ impl<W: ModuleWriterInternal> VirtualWriter<W> {
         self.excludes.matched(path.as_ref(), false).is_whitelist()
     }
 
+    /// Source exclusions are independent of the archive's own relative paths.
+    pub(crate) fn exclude_source(&self, path: impl AsRef<Path>) -> bool {
+        let path = path.as_ref();
+        if self.exclude(path) {
+            return true;
+        }
+        // Temporary `.maturin-symbols-*` directories must not enter the archive
+        // being built. Finished `*.whl.symbols` exports must stay out of later
+        // archives, even if the output directory changes or exports are disabled.
+        // Resolve source paths to cover symlinks and external data as well.
+        if let Ok(source) = path.canonicalize()
+            && source.ancestors().skip(1).any(|ancestor| {
+                ancestor.file_name().is_some_and(|name| {
+                    let name = name.to_string_lossy();
+                    name.starts_with(".maturin-symbols-") || name.ends_with(".whl.symbols")
+                })
+            })
+        {
+            debug!("Excluded debug symbol source {}", path.display());
+            return true;
+        }
+        false
+    }
+
     /// Returns `true` if the given target path has already been added to the archive
     pub(crate) fn contains_target(&self, target: impl AsRef<Path>) -> bool {
         self.tracker.contains_key(target.as_ref())
@@ -92,7 +116,7 @@ impl<W: ModuleWriterInternal> VirtualWriter<W> {
         source: Option<&Path>,
     ) -> Result<Option<VacantEntry<'_, PathBuf, ArchiveSource>>> {
         if let Some(source) = source
-            && self.exclude(source)
+            && self.exclude_source(source)
         {
             return Ok(None);
         }
@@ -421,6 +445,48 @@ mod tests {
         test2
         yes
         ");
+        Ok(())
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn virtual_writer_excludes_symbol_symlinks() -> Result<()> {
+        #[cfg(unix)]
+        use std::os::unix::fs::symlink as symlink_file;
+        #[cfg(windows)]
+        use std::os::windows::fs::symlink_file;
+
+        let tmp_dir = TempDir::new()?;
+        let symbols = tmp_dir.path().join("previous.whl.symbols");
+        fs_err::create_dir(&symbols)?;
+        fs_err::write(symbols.join("private.txt"), "private symbol data")?;
+        let public = tmp_dir.path().join("public.txt");
+        fs_err::write(&public, "ordinary package data")?;
+
+        let private_alias = tmp_dir.path().join("private-alias.txt");
+        let result = symlink_file(symbols.join("private.txt"), &private_alias);
+        #[cfg(windows)]
+        if let Err(err) = &result
+            && err.raw_os_error() == Some(1314)
+        {
+            eprintln!(
+                "Skipping symbol symlink test: symlink creation requires Windows Developer Mode or administrator privileges"
+            );
+            return Ok(());
+        }
+        result?;
+        let public_alias = tmp_dir.path().join("public-alias.txt");
+        symlink_file(&public, &public_alias)?;
+
+        let mut writer = VirtualWriter::new(MockWriter::default(), Override::empty());
+        writer.add_file("private-alias.txt", &private_alias, false)?;
+        writer.add_file("public-alias.txt", &public_alias, false)?;
+        let files = writer.finish()?;
+        assert!(!files.contains_key(Path::new("private-alias.txt")));
+        assert_eq!(
+            files[Path::new("public-alias.txt")],
+            b"ordinary package data"
+        );
         Ok(())
     }
 
